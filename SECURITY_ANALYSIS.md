@@ -1,80 +1,125 @@
-# Phân tích cơ chế mã hóa phía client — WPS Office
+# Security Analysis — WPS Office Client-Side Encryption
 
-**Loại tài liệu:** Báo cáo nghiên cứu bảo mật (Security Research Write-up)
-**Tác giả:** darwnlinz1
-**Trạng thái:** Công khai, đã ẩn thông tin nhạy cảm
+**Document type:** Security research write-up
+**Author:** darwnlinz1
+**Status:** Public, sensitive material redacted
 
-## 1. Tóm tắt (Executive Summary)
+## 1. Executive Summary
 
-Nghiên cứu này phân tích cách ứng dụng WPS Office mã hóa mật khẩu người dùng ở phía client (trên máy người dùng) trước khi gửi lên máy chủ. Kết quả cho thấy ứng dụng dùng thuật toán **RSA với padding PKCS#1 v1.5** và một cơ chế "thử nhiều dạng payload" khá bất thường: nó lần lượt thử mật khẩu ở dạng thô, rồi các dạng băm (hash) MD5/SHA-256 cho đến khi vừa với giới hạn kích thước khóa RSA. Cách làm này lộ ra vài điểm yếu về thiết kế mật mã (padding lỗi thời, thiếu xác thực toàn vẹn, logic không nhất quán). Báo cáo mô tả phương pháp phân tích, đánh giá rủi ro và đề xuất cách khắc phục theo chuẩn hiện đại.
+This research analyzes how WPS Office encrypts a user's password on the client
+side (on the user's machine) before sending it to the server. The application
+uses **RSA with PKCS#1 v1.5 padding** together with an unusual "payload
+selection" mechanism: it tries the password in several forms — raw, then MD5 and
+SHA-256 hashes — and encrypts the first form that fits within the RSA key-size
+limit. This design exposes a few cryptographic weaknesses (outdated padding, no
+integrity protection, inconsistent payload logic). This report documents the
+analysis method, assesses the risk, and proposes fixes based on modern best
+practices.
 
-## 2. Phạm vi & Đạo đức (Scope & Ethics)
+## 2. Scope & Ethics
 
-- Toàn bộ phân tích được thực hiện trên phần mềm **do tôi tự cài đặt hợp pháp trên máy của mình**, phục vụ mục đích học tập và nghiên cứu bảo mật.
-- **Không có hệ thống nào bị tấn công.** Không truy cập trái phép vào máy chủ WPS hay tài khoản của bất kỳ ai.
-- Báo cáo **không công bố khóa thật, không kèm mã khai thác (exploit), không hỗ trợ vượt bản quyền**. Mọi khóa trong ví dụ đều là khóa giả (`dummy`) dùng để minh họa.
-- Mục tiêu: chứng minh khả năng đọc hiểu và đánh giá một sơ đồ mật mã đóng, đồng thời đề xuất hướng vá lỗi.
+- All analysis was performed on software I **installed legally on my own
+  machine**, for educational and security-research purposes.
+- **No systems were attacked.** No unauthorized access was made to WPS servers or
+  to anyone's account.
+- This report contains **no real keys, no exploit code, and nothing that aids
+  piracy or abuse**. All keys shown are `dummy` placeholders for illustration.
+- Goal: demonstrate the ability to read and evaluate a closed cryptographic
+  scheme, and to propose how it should be fixed.
 
-## 3. Phương pháp (Methodology)
+## 3. Methodology
 
-- **Môi trường:** máy Windows cá nhân, cô lập, không ảnh hưởng hệ thống khác.
-- **Cách tiếp cận:**
-  1. Quan sát luồng đăng nhập để xác định thời điểm mật khẩu được xử lý trước khi rời khỏi client.
-  2. Phân tích logic mã hóa để xác định thuật toán, kiểu padding và cách chọn payload.
-  3. Tái hiện độc lập cơ chế bằng một module Python riêng (dùng thư viện `cryptography`) để kiểm chứng hiểu biết — chạy được với **khóa công khai giả**, không dùng khóa thật của WPS.
-- **Tiêu chí "hiểu đúng":** module tự dựng lại được đúng định dạng payload mà ứng dụng gốc tạo ra, không cần dùng lại binary gốc.
+- **Environment:** a personal, isolated Windows machine with no impact on other
+  systems.
+- **Approach:**
+  1. Observe the login flow to identify when the password is processed before it
+     leaves the client.
+  2. Analyze the encryption logic to determine the algorithm, padding type, and
+     payload-selection strategy.
+  3. Independently reproduce the mechanism with a standalone Python module (using
+     the `cryptography` library) to verify understanding — runnable with a
+     **dummy public key**, never with WPS's real key.
+- **Definition of "understood correctly":** the module reconstructs the exact
+  payload format the original application produces, without reusing the original
+  binary.
 
-## 4. Phát hiện kỹ thuật (Technical Findings)
+## 4. Technical Findings
 
-**Thuật toán:** RSA, padding **PKCS#1 v1.5**.
+**Algorithm:** RSA with **PKCS#1 v1.5** padding.
 
-**Cách chọn payload (điểm đáng chú ý nhất):** thay vì luôn mã hóa mật khẩu thô, ứng dụng tính giới hạn kích thước cho phép của khóa RSA — với PKCS#1 v1.5 là `(kích_thước_khóa_byte − 11)` — rồi lần lượt thử các dạng sau và chọn dạng đầu tiên vừa khít:
+**Payload selection (the most notable detail):** instead of always encrypting the
+raw password, the application computes the maximum size allowed by the RSA key —
+for PKCS#1 v1.5 this is `(key_size_in_bytes − 11)` — then tries the following
+forms in order and picks the first one that fits:
 
-1. Mật khẩu thô (UTF-8)
-2. SHA-256 (bytes)
-3. SHA-256 (chuỗi hex)
-4. MD5 (bytes)
-5. MD5 (chuỗi hex)
+1. Raw password (UTF-8)
+2. SHA-256 (raw bytes)
+3. SHA-256 (hex string)
+4. MD5 (raw bytes)
+5. MD5 (hex string)
 
-**Luồng dữ liệu (mô tả):**
+**Data flow:**
 
 ```
-[Mật khẩu người dùng]
+[User password]
         │
         ▼
-[Chọn dạng payload phù hợp kích thước khóa]  ← thử thô → SHA-256 → MD5
+[Select a payload form that fits the key size]  ← raw → SHA-256 → MD5
         │
         ▼
-[Mã hóa RSA / PKCS#1 v1.5 bằng khóa công khai]
+[RSA encryption / PKCS#1 v1.5 with the public key]
         │
         ▼
-[Mã hóa Base64] ──► gửi lên API
+[Base64 encoding] ──► sent to the API
 ```
 
-**Xử lý khóa/IV:** dùng khóa công khai RSA (khóa thật đã ẩn — `[REDACTED]`). RSA không dùng IV. Không phát hiện lớp mã hóa đối xứng hay kiểm tra toàn vẹn nào đi kèm.
+**Key/IV handling:** an RSA public key is used (the real key is redacted —
+`[REDACTED]`). RSA uses no IV. No accompanying symmetric-encryption layer or
+integrity check was found.
 
-## 5. Đánh giá bảo mật (Security Assessment)
+## 5. Security Assessment
 
-- **Padding PKCS#1 v1.5 đã lỗi thời.** Kiểu padding này có tiền sử dính các lỗi dạng *padding oracle* (Bleichenbacher). Chuẩn hiện đại là **RSA-OAEP**.
-- **Logic "thử nhiều dạng payload" là dấu hiệu thiết kế lỏng lẻo.** Việc chấp nhận nhiều định dạng khiến hệ thống khó kiểm soát và dễ có hành vi ngoài ý muốn; một sơ đồ mật mã tốt phải có **một** định dạng payload xác định.
-- **Còn dùng MD5.** MD5 đã bị coi là hỏng về mặt mật mã; sự hiện diện của nó (dù chỉ là fallback) cho thấy thiết kế chưa được cập nhật.
-- **Thiếu xác thực/toàn vẹn.** RSA mã hóa đơn thuần chỉ đảm bảo bí mật, **không** chứng thực dữ liệu không bị sửa. Cần cơ chế xác thực (authenticated encryption).
-- **Rủi ro nếu khóa nhỏ.** Nếu khóa thật ở mức 512–1024 bit thì độ an toàn rất thấp (512-bit RSA có thể bị phá). Khuyến nghị tối thiểu 2048-bit.
-- **Ghi chú bối cảnh:** kênh truyền thường đã được TLS bảo vệ, nên lớp RSA phía client này chủ yếu là phòng thủ bổ sung; nếu tự làm không chuẩn, nó dễ trở thành *security theater* (trông có vẻ an toàn nhưng không tăng an toàn thực chất).
+- **PKCS#1 v1.5 padding is outdated.** This padding has a history of *padding
+  oracle* vulnerabilities (Bleichenbacher). The modern standard is **RSA-OAEP**.
+- **The "try multiple payload forms" logic signals loose design.** Accepting many
+  formats makes the system harder to reason about and prone to unexpected
+  behavior; a sound scheme should have **one** deterministic payload format.
+- **MD5 is still present.** MD5 is considered cryptographically broken; its
+  presence (even as a fallback) shows the design has not been modernized.
+- **No integrity / authentication.** Plain RSA encryption provides confidentiality
+  only; it does **not** prove the data was not tampered with. Authenticated
+  encryption is needed.
+- **Risk if the key is small.** If the real key is 512–1024 bits, security is very
+  low (512-bit RSA is breakable). At least 2048 bits is recommended.
+- **Context note:** the transport channel is usually already protected by TLS, so
+  this client-side RSA layer is mainly defense-in-depth; done incorrectly it
+  easily becomes *security theater* (looks safe without meaningfully increasing
+  safety).
 
-## 6. Khuyến nghị (Recommendations)
+## 6. Recommendations
 
-Nếu đây là ứng dụng của tôi, tôi sẽ:
+If this were my own application, I would:
 
-1. **Thay PKCS#1 v1.5 bằng RSA-OAEP (SHA-256).**
-2. **Dùng một định dạng payload duy nhất, cố định** — bỏ hoàn toàn cơ chế thử nhiều dạng.
-3. **Loại bỏ MD5.** Nếu cần băm, dùng SHA-256 trở lên.
-4. **Với dữ liệu lớn, dùng mã hóa lai (hybrid):** AES-256-GCM cho dữ liệu + RSA-OAEP để bọc khóa AES — vừa bí mật vừa toàn vẹn.
-5. **Không xác thực mật khẩu bằng cách mã hóa trực tiếp.** Nên dùng giao thức chuẩn (ví dụ băm phía server bằng Argon2/bcrypt, hoặc cơ chế như SRP) để server không bao giờ thấy mật khẩu thô.
-6. **Khóa RSA ≥ 2048-bit** và có quy trình luân chuyển khóa.
+1. **Replace PKCS#1 v1.5 with RSA-OAEP (SHA-256).**
+2. **Use a single, fixed payload format** — remove the multi-form fallback
+   entirely.
+3. **Drop MD5.** Use SHA-256 or stronger if hashing is needed.
+4. **For larger data, use hybrid encryption:** AES-256-GCM for the data plus
+   RSA-OAEP to wrap the AES key — providing both confidentiality and integrity.
+5. **Do not authenticate a password by encrypting it directly.** Use a standard
+   protocol (server-side hashing with Argon2/bcrypt, or a scheme like SRP) so the
+   server never sees the raw password.
+6. **Use RSA keys ≥ 2048 bits** with a key-rotation process.
 
-## 7. Kết luận & Bài học (Conclusion & What I Learned)
+## 7. Conclusion & What I Learned
 
-Qua bài này tôi luyện được: xác định thuật toán và padding trong một sơ đồ mật mã đóng, hiểu vì sao PKCS#1 v1.5 và MD5 bị xem là rủi ro, và tái hiện độc lập một cơ chế để kiểm chứng hiểu biết mà không cần chạm vào hệ thống của bên khác. Quan trọng nhất: phân biệt được giữa "mã hóa cho có" và mã hóa thật sự an toàn — cùng cách viết lại nó cho đúng chuẩn hiện đại.
+This exercise built skills in identifying the algorithm and padding of a closed
+cryptographic scheme, understanding why PKCS#1 v1.5 and MD5 are considered risky,
+and independently reproducing a mechanism to verify understanding without
+touching anyone else's systems. The key takeaway: distinguishing "encryption for
+show" from genuinely secure encryption — and knowing how to rebuild it to modern
+standards.
 
-> *Tuyên bố miễn trừ: Tài liệu chỉ phục vụ mục đích giáo dục và nghiên cứu bảo mật. Không kèm mã khai thác, không công bố khóa thật, không hỗ trợ vi phạm bản quyền.*
+> *Disclaimer: This document is for educational and security-research purposes
+> only. It contains no exploit code, no real keys, and does not aid copyright
+> infringement.*
